@@ -12,6 +12,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.UnsupportedEncodingException;
+import java.io.OutputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.Writer;
+import java.io.PrintWriter;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -33,6 +37,7 @@ import java.util.logging.Logger;
 
 import javax.annotation.Nonnull;
 
+import hudson.FilePath;
 import org.apache.commons.lang.StringUtils;
 import org.jenkinsci.plugins.ParameterizedRemoteTrigger.BuildContext;
 import org.jenkinsci.plugins.ParameterizedRemoteTrigger.ConnectionResponse;
@@ -380,6 +385,62 @@ public class HttpHelper {
 
 		return triggerUrlString;
 	}
+
+	private static boolean shouldSendByFormData(Map<String, Object> params) {
+		for (String key : params.keySet()) {
+			if (params.get(key) instanceof FilePath) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static String createBoundary() {
+		return "===" + System.currentTimeMillis() + "===";
+	}
+
+	private static byte[] buildFormData(Map<String, Object> params, String boundary) throws IOException, InterruptedException {
+		OutputStream stream = new ByteArrayOutputStream();
+		Writer writer = new PrintWriter(stream);
+		final String LINE_FEED = "\r\n";
+
+		for (String key : params.keySet()) {
+			writer.append("--").append(boundary).append(LINE_FEED);
+			writer.append("Content-Disposition: form-data; name=\"").append(key).append("\"");
+			Object value = params.get(key);
+			if (value instanceof String) {
+				writer.append(LINE_FEED);
+				writer.append("Content-Type: text/plain; charset=utf-8").append(LINE_FEED);
+				writer.append(LINE_FEED);
+				writer.append((String) value);
+			}
+			else {
+				FilePath path = (FilePath) value;
+				String filename = path.getName();
+				writer.append("; filename=\"").append(filename ).append("\"").append(LINE_FEED);
+				writer.append("Content-Type: ").append(URLConnection.guessContentTypeFromName(filename)).append(LINE_FEED);
+				writer.append("Content-Transfer-Encoding: binary").append(LINE_FEED);
+				writer.append(LINE_FEED);
+				writer.flush();
+
+				InputStream inputStream = path.read();
+				byte[] buffer = new byte[4096];
+				int bytesRead;
+				while ((bytesRead = inputStream.read(buffer)) != -1) {
+					stream.write(buffer, 0, bytesRead);
+				}
+				stream.flush();
+				inputStream.close();
+			}
+			writer.append(LINE_FEED);
+			writer.flush();
+		}
+
+		writer.append("--").append(boundary).append("--").append(LINE_FEED);
+		writer.close();
+		return ((ByteArrayOutputStream) stream).toByteArray();
+	}
 	
 	/**
 	 * Same as sendHTTPCall, but keeps track of the number of failed connection
@@ -414,7 +475,7 @@ public class HttpHelper {
 	 * 
 	 */
 	private static ConnectionResponse sendHTTPCall(String urlString, String requestType, BuildContext context,
-			Collection<String> postParams, int numberOfAttempts, int pollInterval, int retryLimit, Auth2 overrideAuth,
+			Map<String, Object> postParams, int numberOfAttempts, int pollInterval, int retryLimit, Auth2 overrideAuth,
 			StringBuilder rawRespRef, boolean isCrubmCacheEnabled) throws IOException, InterruptedException {
 
 		JSONObject responseObject = null;
@@ -423,9 +484,26 @@ public class HttpHelper {
 
 		byte[] postDataBytes = new byte[] {};
 		String parmsString = "";
-		if (HTTP_POST.equalsIgnoreCase(requestType) && postParams != null && postParams.size() > 0) {
-			parmsString = buildUrlQueryString(postParams);
-			postDataBytes = parmsString.getBytes("UTF-8");
+		boolean postMode = HTTP_POST.equalsIgnoreCase(requestType);
+		boolean postWithForm = false;
+		String postContentsType = "";
+		if (postMode && postParams != null && postParams.size() > 0) {
+			postWithForm = shouldSendByFormData(postParams);
+			if (postWithForm) {
+				String formBoundary = createBoundary();
+				postContentsType = "multipart/form-data; boundary=" + formBoundary;
+				postDataBytes = buildFormData(postParams, formBoundary);
+			}
+			else {
+				postContentsType = "application/x-www-form-urlencoded";
+
+				List<String> paramList = new ArrayList<String>();
+				for (String key : postParams.keySet()) {
+					paramList.add(String.format("{0}={1}", key, postParams.get(key)));
+				}
+				parmsString = buildUrlQueryString(paramList);
+				postDataBytes = parmsString.getBytes("UTF-8");
+			}
 		}
 
 		URL url = new URL(urlString);
@@ -440,8 +518,8 @@ public class HttpHelper {
 			// wait up to 5 seconds for the connection to be open
 			conn.setConnectTimeout(5000);
 			conn.setReadTimeout(10000);
-			if (HTTP_POST.equalsIgnoreCase(requestType)) {
-				conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+			if (postMode) {
+				conn.setRequestProperty("Content-Type", postContentsType);
 				conn.setRequestProperty("Content-Length", String.valueOf(postDataBytes.length));
 				conn.setDoOutput(true);
 				conn.getOutputStream().write(postDataBytes);
@@ -540,7 +618,7 @@ public class HttpHelper {
 	}
 
 	private static ConnectionResponse tryCall(String urlString, String method, BuildContext context,
-			Collection<String> params, int pollInterval, int retryLimit, Auth2 overrideAuth, StringBuilder rawRespRef,
+			Map<String, Object> params, int pollInterval, int retryLimit, Auth2 overrideAuth, StringBuilder rawRespRef,
 			Semaphore lock, boolean isCrubmCacheEnabled) throws IOException, InterruptedException {
 		if (lock == null) {
 			context.logger.println("calling remote without locking...");
@@ -574,7 +652,7 @@ public class HttpHelper {
 		}
 	}
 
-	public static ConnectionResponse tryPost(String urlString, BuildContext context, Collection<String> params,
+	public static ConnectionResponse tryPost(String urlString, BuildContext context, Map<String, Object> params,
 			int pollInterval, int retryLimit, Auth2 overrideAuth, Semaphore lock, boolean isCrubmCacheEnabled)
 			throws IOException, InterruptedException {
 
@@ -593,7 +671,7 @@ public class HttpHelper {
 		return resp.toString();
 	}
 
-	public static ConnectionResponse post(String urlString, BuildContext context, Collection<String> params,
+	public static ConnectionResponse post(String urlString, BuildContext context, Map<String, Object> params,
 			int pollInterval, int retryLimit, Auth2 overrideAuth, boolean isCrubmCacheEnabled) throws IOException, InterruptedException {
 		return tryPost(urlString, context, params, pollInterval, retryLimit, overrideAuth, null, isCrubmCacheEnabled);
 	}

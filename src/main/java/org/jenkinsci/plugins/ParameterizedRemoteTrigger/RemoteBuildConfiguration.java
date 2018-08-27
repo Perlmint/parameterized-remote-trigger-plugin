@@ -235,17 +235,38 @@ public class RemoteBuildConfiguration extends Builder implements SimpleBuildStep
 			this.parameterFile = parameterFile;
 	}
 
-	public List<String> getParameterList(BuildContext context) {
+	public Map<String, Object> getParameterList(BuildContext context) {
 		String params = getParameters();
+		List<String> parameters;
 		if (!params.isEmpty()) {
 			String[] parameterArray = params.split("\n");
 			parameterArray = stripAll(parameterArray);
-			return new ArrayList<String>(Arrays.asList(parameterArray));
+			parameters = Arrays.asList(parameterArray);
 		} else if (loadParamsFromFile) {
-			return loadExternalParameterFile(context);
+			parameters = loadExternalParameterFile(context);
 		} else {
-			return new ArrayList<String>();
+			return new HashMap<String, Object>();
 		}
+
+		return loadFilePrameters(getCleanedParameters(parameters), context);
+	}
+
+	private Map<String, Object> loadFilePrameters(Collection<String> parameters, BuildContext context) {
+		Map<String, Object> ret = new HashMap<String, Object>();
+		for (String parameter : parameters) {
+			int delimeterPos = parameter.indexOf('=');
+			String key = parameter.substring(0, delimeterPos);
+			String value = parameter.substring(delimeterPos + 1);
+			if (value.startsWith("@")) {
+				FilePath filePath = context.workspace.child(value.substring(1));
+				ret.put(key, filePath);
+			}
+			else {
+				ret.put(key, value.replace("\\@", "@"));
+			}
+		}
+
+		return ret;
 	}
 
 	/**
@@ -586,7 +607,7 @@ public class RemoteBuildConfiguration extends Builder implements SimpleBuildStep
 	 * 
 	 */
 	public Handle performTriggerAndGetQueueId(BuildContext context) throws IOException, InterruptedException {
-		List<String> cleanedParams = getCleanedParameters(getParameterList(context));
+		Map<String, Object> cleanedParams = getParameterList(context);
 		String jobNameOrUrl = this.getJob();
 		String securityToken = this.getToken();
 		try {
@@ -861,7 +882,7 @@ public class RemoteBuildConfiguration extends Builder implements SimpleBuildStep
 		}
 	}
 
-	private void logConfiguration(BuildContext context, List<String> effectiveParams) throws IOException {
+	private void logConfiguration(BuildContext context, Map<String, Object> effectiveParams) throws IOException {
 		String _job = getJob();
 		String _jobExpanded = getJobExpanded(context);
 		String _jobExpandedLogEntry = (_job.equals(_jobExpanded)) ? "" : "(" + _jobExpanded + ")";
