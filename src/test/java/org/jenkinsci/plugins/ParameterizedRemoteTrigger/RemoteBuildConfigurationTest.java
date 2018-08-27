@@ -16,6 +16,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import hudson.Functions;
+import hudson.tasks.BatchFile;
+import hudson.tasks.Builder;
+import hudson.tasks.Shell;
 import org.apache.commons.io.IOUtils;
 import org.jenkinsci.plugins.ParameterizedRemoteTrigger.RemoteBuildConfiguration.DescriptorImpl;
 import org.jenkinsci.plugins.ParameterizedRemoteTrigger.auth2.NullAuth;
@@ -36,6 +40,7 @@ import hudson.model.FreeStyleProject;
 import hudson.model.ParametersDefinitionProperty;
 import hudson.model.StringParameterDefinition;
 import hudson.model.User;
+import hudson.model.FileParameterDefinition;
 import hudson.security.HudsonPrivateSecurityRealm;
 import hudson.security.SecurityRealm;
 import hudson.security.AuthorizationStrategy.Unsecured;
@@ -93,10 +98,10 @@ public class RemoteBuildConfigurationTest {
 		Map<String, String> parms = new HashMap<>();
 		parms.put("parameterName1", "value1");
 		parms.put("parameterName2", "value2");
-        this._testRemoteBuild(authenticate, withParam, remoteProject, parms);
+        this._testRemoteBuild(authenticate, withParam, remoteProject, parms, null);
     }
 	
-	private void _testRemoteBuild(boolean authenticate, boolean withParam, FreeStyleProject remoteProject, Map<String, String> parms) throws Exception {
+	private void _testRemoteBuild(boolean authenticate, boolean withParam, FreeStyleProject remoteProject, Map<String, String> parms, Map<String, String> files) throws Exception {
 
         String remoteUrl = jenkinsRule.getURL().toString();
         RemoteJenkinsServer remoteJenkinsServer = new RemoteJenkinsServer();
@@ -107,6 +112,20 @@ public class RemoteBuildConfigurationTest {
         descriptor.setRemoteSites(remoteJenkinsServer);
 
         FreeStyleProject project = jenkinsRule.createFreeStyleProject();
+        if (files != null) {
+            String command = "";
+            final boolean isWindows = Functions.isWindows();
+            for (Map.Entry<String, String> entry : files.entrySet()) {
+                if (isWindows) {
+                    command += "echo|set /p DUMMY=\"" + entry.getValue() + "\" > " + entry.getKey() + "\r\n";
+                }
+                else {
+                    command += "echo " + entry.getValue() + " > " + entry.getKey() + "\r";
+                }
+            }
+            Builder step =  isWindows ? new BatchFile(command) : new Shell(command);
+            project.getBuildersList().add(step);
+        }
         RemoteBuildConfiguration configuration = new RemoteBuildConfiguration();
         configuration.setJob(remoteProject.getFullName());
         configuration.setRemoteJenkinsName(remoteJenkinsServer.getDisplayName());
@@ -147,7 +166,14 @@ public class RemoteBuildConfigurationTest {
         if (withParam){
             EnvVars remoteEnv = lastBuild.getEnvironment(new LogTaskListener(null, null));
         	for (Map.Entry<String, String> p : parms.entrySet()) {
-        		assertEquals(p.getValue(), remoteEnv.get(p.getKey()));
+        	    final String pValue = p.getValue();
+        	    final String pKey = p.getKey();
+        	    Object envValue = remoteEnv.get(pKey);
+        	    if (pValue.startsWith("@")) {
+                    assertEquals(files.get(pValue.substring(1)), lastBuild.getWorkspace().child(pKey).readToString());
+                } else {
+                    assertEquals(pValue, envValue);
+                }
         	}	
         } else {
         	assertNotEquals("lastBuild should be executed no matter the result which depends on the remote job configuration.", null, lastBuild.getNumber());
@@ -475,7 +501,20 @@ public class RemoteBuildConfigurationTest {
 		Map<String, String> parms = new HashMap<>();
 		parms.put("parameterName1", TestConst.garbled5KString1);
 		parms.put("parameterName2", TestConst.garbled5KString2);
-		_testRemoteBuild(true, true, remoteProject, parms);
+		_testRemoteBuild(true, true, remoteProject, parms, null);
 	}
 
+    @Test
+    public void testRemoteBuildWithFileParam() throws Exception {
+        enableAuth();
+        FreeStyleProject remoteProject = jenkinsRule.createFreeStyleProject();
+        remoteProject.addProperty(
+                new ParametersDefinitionProperty(new FileParameterDefinition("file.txt", "file")));
+        Map<String, String> parms = new HashMap<>();
+        parms.put("file.txt", "@file");
+        Map<String, String> files = new HashMap<>();
+        files.put("file", "fileData");
+
+        _testRemoteBuild(true, true, remoteProject, parms, files);
+    }
 }
